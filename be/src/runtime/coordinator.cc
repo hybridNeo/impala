@@ -126,6 +126,7 @@ Status Coordinator::Exec() {
     // Populate the runtime filter routing table. This should happen before starting the
     // fragment instances. This code anticipates the indices of the instance states
     // created later on in ExecRemoteFragment()
+    InitAggregatorRoutingTable();
     InitFilterRoutingTable();
   }
 
@@ -254,6 +255,33 @@ void Coordinator::ExecSummary::Init(const QuerySchedule& schedule) {
   }
 }
 
+void Coordinator::InitAggregatorRoutingTable(){
+  int num_backends = backend_states_.size();
+  int num_filters_assigned = 0;
+  DCHECK(schedule_.request().query_ctx.client_request.query_options.mt_dop == 0);
+  DCHECK_NE(filter_mode_, TRuntimeFilterMode::OFF)
+      << "InitAggregatorRoutingTable() called although runtime filters are disabled";
+  DCHECK(!filter_routing_table_complete_)
+      << "InitAggregatorRoutingTable() called after setting filter_routing_table_complete_";
+  for (const FragmentExecParams& fragment_params: schedule_.fragment_exec_params()) {
+    int num_instances = fragment_params.instance_exec_params.size();
+    DCHECK_GT(num_instances, 0);
+    for (const TPlanNode& plan_node: fragment_params.fragment.plan.nodes) {
+      if(!plan_node.__isset.runtime_filters) continue;
+      VLOG_QUERY << "Size of real : Origin " << plan_node.runtime_filters.size();
+      for (const TRuntimeFilterDesc& filter: plan_node.runtime_filters) {
+        DCHECK(filter_mode_ == TRuntimeFilterMode::GLOBAL || filter.has_local_targets);
+        VLOG_QUERY << "InitAggregatorRoutingTable() " << filter.filter_id 
+            << " : " << plan_node.node_id;
+        aggregator_routing_table_.insert(std::pair<int32_t, TNetworkAddress>(
+            filter.filter_id, 
+            backend_states_[num_filters_assigned++ % num_backends]->impalad_address()));
+      }
+    }
+  }  
+}
+
+
 void Coordinator::InitFilterRoutingTable() {
   DCHECK(schedule_.request().query_ctx.client_request.query_options.mt_dop == 0);
   DCHECK_NE(filter_mode_, TRuntimeFilterMode::OFF)
@@ -334,7 +362,7 @@ void Coordinator::StartBackendExec() {
     ExecEnv::GetInstance()->exec_rpc_thread_pool()->Offer(
         [backend_state, this, &debug_options]() {
           backend_state->Exec(query_ctx(), debug_options, filter_routing_table_,
-              exec_rpcs_complete_barrier_.get());
+              aggregator_routing_table_, exec_rpcs_complete_barrier_.get());
         });
   }
   exec_rpcs_complete_barrier_->Wait();

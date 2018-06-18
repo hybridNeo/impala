@@ -301,6 +301,9 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
   typedef boost::unordered_map<int32_t, FilterState> FilterRoutingTable;
   FilterRoutingTable filter_routing_table_;
 
+  typedef boost::unordered_map<int32_t, TNetworkAddress> AggregatorRoutingTable;
+  AggregatorRoutingTable aggregator_routing_table_;
+
   /// Set to true when all calls to UpdateFilterRoutingTable() have finished, and it's
   /// safe to concurrently read from filter_routing_table_.
   bool filter_routing_table_complete_ = false;
@@ -409,6 +412,10 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
   /// Build the filter routing table by iterating over all plan nodes and collecting the
   /// filters that they either produce or consume.
   void InitFilterRoutingTable();
+
+  /// Build the aggregator routing table by iterating over all plan nodes and 
+  /// assigning the filter_id to a backend state.
+  void InitAggregatorRoutingTable();
 
   /// Helper for HandleExecStateTransition(). Releases all resources associated with
   /// query execution. The ExecState state-machine ensures this is called exactly once.

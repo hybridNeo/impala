@@ -37,6 +37,61 @@
 
 using namespace impala;
 
+void QueryExecMgr::FilterAggregator::InitFilterRoutingTable(const TExecQueryFInstancesParams& rpc_params) {
+  int num_instances = 3;
+  vector<int> src_idxs;
+  for (const TPlanNode& plan_node: rpc_params.fragment_ctxs.back().fragment.plan.nodes) {
+    if (!plan_node.__isset.runtime_filters) continue; 
+    for (const TRuntimeFilterDesc& filter: plan_node.runtime_filters) {
+      VLOG_QUERY << "RUNTIME_FILTERING : filter_id : " << filter.filter_id;  
+      FilterRoutingTable::iterator i = filter_routing_table_.emplace(
+          filter.filter_id, FilterState(filter, plan_node.node_id)).first;
+      FilterState* f = &(i->second);   
+      // source plan node of filter
+      if (plan_node.__isset.hash_join_node) {
+        // Set the 'pending_count_' to zero to indicate that for a filter with
+        // local-only targets the coordinator does not expect to receive any filter
+        // updates.
+        int pending_count = filter.is_broadcast_join
+            ? (filter.has_remote_targets ? 1 : 0) : num_instances;
+        f->set_pending_count(pending_count);
+
+        // determine source instances
+        // TODO: store this in FInstanceExecParams, not in FilterState
+        //vector<int> src_idxs = fragment_params.GetInstanceIdxs();
+
+        // If this is a broadcast join with only non-local targets, build and publish it
+        // on MAX_BROADCAST_FILTER_PRODUCERS instances. If this is not a broadcast join
+        // or it is a broadcast join with local targets, it should be generated
+        // everywhere the join is executed.
+        // if (filter.is_broadcast_join && !filter.has_local_targets
+        //     && num_instances > MAX_BROADCAST_FILTER_PRODUCERS) {
+        //   random_shuffle(src_idxs.begin(), src_idxs.end());
+        //   src_idxs.resize(MAX_BROADCAST_FILTER_PRODUCERS);
+        // }
+        // f->src_fragment_instance_idxs()->insert(src_idxs.begin(), src_idxs.end());
+
+      // target plan node of filter
+      } else if (plan_node.__isset.hdfs_scan_node || plan_node.__isset.kudu_scan_node) {
+        // auto it = filter.planid_to_target_ndx.find(plan_node.node_id);
+        // DCHECK(it != filter.planid_to_target_ndx.end());
+        // const TRuntimeFilterTargetDesc& t_target = filter.targets[it->second];
+        // DCHECK(filter_mode_ == TRuntimeFilterMode::GLOBAL || t_target.is_local_target);
+        // f->targets()->emplace_back(t_target, fragment_params.fragment.idx);
+      } else {
+        // DCHECK(false) << "Unexpected plan node with runtime filters: "
+        //     << ThriftDebugString(plan_node);
+      }
+      map<int32_t, TNetworkAddress>::const_iterator it =
+          rpc_params.aggregator_routing_table.find(filter.filter_id);
+      if (it != rpc_params.aggregator_routing_table.end()) {
+        VLOG_QUERY << "Node address " 
+            << TNetworkAddressToString(it->second); 
+       }
+     } 
+  }
+}
+
 // TODO: this logging should go into a per query log.
 DEFINE_int32(log_mem_usage_interval, 0, "If non-zero, impalad will output memory usage "
     "every log_mem_usage_interval'th fragment completion.");
@@ -45,7 +100,15 @@ Status QueryExecMgr::StartQuery(const TExecQueryFInstancesParams& params) {
   TUniqueId query_id = params.query_ctx.query_id;
   VLOG_QUERY << "StartQueryFInstances() query_id=" << PrintId(query_id)
              << " coord=" << TNetworkAddressToString(params.query_ctx.coord_address);
-
+  VLOG_QUERY << "Size of real : Transferred : " << params.aggregator_routing_table.size(); 
+  VLOG_QUERY << "Printing out aggregator parameters";
+  map<int32_t, TNetworkAddress>::const_iterator it;
+  for (it = params.aggregator_routing_table.begin(); it != 
+          params.aggregator_routing_table.end(); it++) {
+    VLOG_QUERY <<  std::to_string(it->first) << TNetworkAddressToString(it->second) ;
+  }
+  
+  filter_aggregator_.InitFilterRoutingTable(params);
   bool dummy;
   QueryState* qs = GetOrCreateQueryState(params.query_ctx, &dummy);
   Status status = qs->Init(params);

@@ -515,6 +515,9 @@ struct TExecQueryFInstancesParams {
   // operators in all fragment instances that execute on this backend. This is used for
   // an optimization in InitialReservation. Measured in bytes. required in V1
   7: optional i64 initial_mem_reservation_total_claims
+
+  // Aggregator routing table which maps filter id to the appropriate backend aggregator
+  8: optional map<i32,Types.TNetworkAddress> aggregator_routing_table
 }
 
 struct TExecQueryFInstancesResult {

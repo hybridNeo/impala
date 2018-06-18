@@ -84,9 +84,9 @@ void Coordinator::BackendState::SetRpcParams(const DebugOptions& debug_options,
       backend_exec_params_->min_mem_reservation_bytes);
   rpc_params->__set_initial_mem_reservation_total_claims(
       backend_exec_params_->initial_mem_reservation_total_claims);
-
   // set fragment_ctxs and fragment_instance_ctxs
   rpc_params->__isset.fragment_ctxs = true;
+  rpc_params->__isset.aggregator_routing_table = true;
   rpc_params->__isset.fragment_instance_ctxs = true;
   rpc_params->fragment_instance_ctxs.resize(backend_exec_params_->instance_params.size());
   for (int i = 0; i < backend_exec_params_->instance_params.size(); ++i) {
@@ -151,16 +151,20 @@ void Coordinator::BackendState::SetRpcParams(const DebugOptions& debug_options,
 
 void Coordinator::BackendState::Exec(
     const TQueryCtx& query_ctx, const DebugOptions& debug_options,
-    const FilterRoutingTable& filter_routing_table,
-    CountingBarrier* exec_complete_barrier) {
+    const FilterRoutingTable& filter_routing_table, const AggregatorRoutingTable& 
+    aggregator_routing_table, CountingBarrier* exec_complete_barrier) {
   NotifyBarrierOnExit notifier(exec_complete_barrier);
   TExecQueryFInstancesParams rpc_params;
   rpc_params.__set_query_ctx(query_ctx);
+  // copy the aggregator routing table
   SetRpcParams(debug_options, filter_routing_table, &rpc_params);
+  rpc_params.aggregator_routing_table.insert(aggregator_routing_table.begin(), 
+      aggregator_routing_table.end());     
+  VLOG_QUERY << "Size of real : " << aggregator_routing_table.size() << " size of copied :"
+      << rpc_params.aggregator_routing_table.size();
   VLOG_FILE << "making rpc: ExecQueryFInstances"
       << " host=" << TNetworkAddressToString(impalad_address()) << " query_id="
       << PrintId(query_id_);
-
   // guard against concurrent UpdateBackendExecStatus() that may arrive after RPC returns
   lock_guard<mutex> l(lock_);
   int64_t start = MonotonicMillis();

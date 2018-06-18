@@ -71,8 +71,8 @@ class Coordinator::BackendState {
   /// The debug_options are applied to the appropriate TPlanFragmentInstanceCtxs, based
   /// on their node_id/instance_idx.
   void Exec(const TQueryCtx& query_ctx, const DebugOptions& debug_options,
-      const FilterRoutingTable& filter_routing_table,
-      CountingBarrier* rpc_complete_barrier);
+      const FilterRoutingTable& filter_routing_table, const AggregatorRoutingTable& 
+      aggregator_routing_table, CountingBarrier* rpc_complete_barrier);
 
   /// Update overall execution status, including the instances' exec status/profiles
   /// and the error log, if this backend is not already done. Updates the fragment
