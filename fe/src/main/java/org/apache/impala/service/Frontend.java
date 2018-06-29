@@ -988,6 +988,19 @@ public class Frontend {
     result.setQuery_ctx(queryCtx);  // needed by getExplainString()
     ArrayList<PlanFragment> allFragments = planRoots.get(0).getNodesPreOrder();
     explainString.append(planner.getExplainString(allFragments, result));
+    // hack
+    // String explainText = explainString.toString();
+    //LOG.info("EXPLAIN_TEXT" + explainText);
+    //int i = 0;
+    //for ( String s : explainString.split("\n")) {
+    //  LOG.info("EPLX_TEXT" + Integer.toString(i++) +  s); 
+    //}
+    if( queryCtx.getTables_missing_stats() != null) {
+      for ( TTableName tableName : queryCtx.getTables_missing_stats()) {
+        LOG.info("Missing stat: " + tableName.db_name +  tableName.table_name);
+      }
+    }
+    // end hack
     result.setQuery_plan(explainString.toString());
 
     return result;
