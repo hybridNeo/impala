@@ -229,7 +229,7 @@ class ClientRequestState {
 
   RuntimeProfile::EventSequence* query_events() const { return query_events_; }
   RuntimeProfile* summary_profile() { return summary_profile_; }
-
+  std::vector<TTableName> tables_missing_stats;
  private:
   const TQueryCtx query_ctx_;
 

@@ -138,7 +138,7 @@ Status ClientRequestState::SetResultCache(QueryResultSet* cache,
 Status ClientRequestState::Exec(TExecRequest* exec_request) {
   MarkActive();
   exec_request_ = *exec_request;
-
+  VLOG_QUERY << "Exec calling";
   profile_->AddChild(server_profile_);
   summary_profile_->AddInfoString("Query Type", PrintThriftEnum(stmt_type()));
   summary_profile_->AddInfoString("Query Options (set by configuration)",
@@ -405,6 +405,9 @@ Status ClientRequestState::ExecQueryOrDmlRequest(
   DCHECK(query_exec_request.plan_exec_info.size() > 0);
 
   if (query_exec_request.__isset.query_plan) {
+    VLOG_QUERY << "IN nested queryexc ";
+    VLOG_QUERY << query_exec_request.query_ctx.tables_missing_stats.size();
+    tables_missing_stats = query_exec_request.query_ctx.tables_missing_stats;
     stringstream plan_ss;
     // Add some delimiters to make it clearer where the plan
     // begins and the profile ends
@@ -566,7 +569,7 @@ void ClientRequestState::Done() {
   // Make sure we join on wait_thread_ before we finish (and especially before this object
   // is destroyed).
   BlockOnWait();
-
+  VLOG_QUERY << "Done: MISSING" << tables_missing_stats.size() ;
   // Update latest observed Kudu timestamp stored in the session from the coordinator.
   // Needs to take the session_ lock which must not be taken while holding lock_, so this
   // must happen before taking lock_ below.
@@ -918,6 +921,7 @@ Status ClientRequestState::UpdateCatalog() {
   SCOPED_TIMER(ADD_TIMER(server_profile_, "MetastoreUpdateTimer"));
 
   TQueryExecRequest query_exec_request = exec_request().query_exec_request;
+  VLOG_QUERY << "UpdateCat: Missing " << query_exec_request.query_ctx.tables_missing_stats.size();
   if (query_exec_request.__isset.finalize_params) {
     const TFinalizeParams& finalize_params = query_exec_request.finalize_params;
     TUpdateCatalogRequest catalog_update;
