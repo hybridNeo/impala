@@ -427,6 +427,9 @@ struct TQueryCtx {
   // It is guaranteed to be a valid timezone on the coordinator (but not necessarily on
   // the executor, since in theory the executor could have a different timezone db).
   18: required string local_time_zone
+
+  // Boolean to indicate auto compute query.
+  19: optional bool is_auto_complete 
 }
 
 // Specification of one output destination of a plan fragment
