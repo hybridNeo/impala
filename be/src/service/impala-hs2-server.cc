@@ -410,6 +410,7 @@ void ImpalaServer::ExecuteStatement(TExecuteStatementResp& return_val,
   // difference is that rows are not available when ExecuteStatement() returns.
   TQueryCtx query_ctx;
   Status status = TExecuteStatementReqToTQueryContext(request, &query_ctx);
+  query_ctx.is_auto_compute = request.is_auto_compute;
   HS2_RETURN_IF_ERROR(return_val, status, SQLSTATE_GENERAL_ERROR);
 
   TUniqueId session_id;

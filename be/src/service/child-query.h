@@ -50,12 +50,13 @@ class ImpalaServer;
 class ChildQuery {
  public:
   ChildQuery(const std::string& query, ClientRequestState* parent_request_state,
-      ImpalaServer* parent_server)
+      ImpalaServer* parent_server, bool auto_compute = false)
     : query_(query),
       parent_request_state_(parent_request_state),
       parent_server_(parent_server),
       is_running_(false),
-      is_cancelled_(false) {
+      is_cancelled_(false),
+      is_auto_compute_(auto_compute) {
     DCHECK(!query_.empty());
     DCHECK(parent_request_state_ != NULL);
     DCHECK(parent_server_ != NULL);
@@ -140,6 +141,9 @@ class ChildQuery {
 
   /// Indicates whether this child query has been cancelled. Set in Cancel().
   bool is_cancelled_;
+
+  /// Indicates whether this child query is called to auto compute stats.
+  bool is_auto_compute_;
 };
 
 /// Asynchronously executes a set of child queries in a separate thread.

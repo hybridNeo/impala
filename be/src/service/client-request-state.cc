@@ -609,11 +609,10 @@ void ClientRequestState::Done() {
   // is destroyed).
   BlockOnWait();
   VLOG_QUERY << "Done: MISSING" << tables_missing_stats.size() ;
-  if( tables_missing_stats.size() > 1 && auto_compute_) {
-    auto_compute_ = false;  
+  if( (tables_missing_stats.size() > 0) && (!query_ctx_.is_auto_compute)) {
     for ( TTableName tb : tables_missing_stats) {
       ChildQuery c("compute stats " + tb.db_name + "." + 
-              tb.table_name , this, parent_server_);
+              tb.table_name , this, parent_server_, true);
       c.ExecAndFetch();
     }
   }

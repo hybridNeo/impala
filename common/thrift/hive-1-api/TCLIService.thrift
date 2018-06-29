@@ -686,6 +686,8 @@ struct TExecuteStatementReq {
 
   // Execute asynchronously when runAsync is true
   4: optional bool runAsync = false
+
+  5: optional bool is_auto_compute = false
 }
 
 struct TExecuteStatementResp {

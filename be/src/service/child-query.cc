@@ -48,6 +48,7 @@ Status ChildQuery::ExecAndFetch() {
   SetQueryOptions(parent_request_state_->exec_request().query_options, &exec_stmt_req);
   exec_stmt_req.confOverlay[PARENT_QUERY_OPT] =
       PrintId(parent_request_state_->query_id());
+  exec_stmt_req.is_auto_compute = is_auto_compute_;
 
   // Starting executing of the child query and setting is_running are not made atomic
   // because holding a lock while calling into the parent_server_ may result in deadlock.
