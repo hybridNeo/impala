@@ -609,8 +609,8 @@ void ClientRequestState::Done() {
   // is destroyed).
   BlockOnWait();
   VLOG_QUERY << "Done: MISSING" << tables_missing_stats.size() ;
-  
-  if( tables_missing_stats.size() > 1) {
+  if( tables_missing_stats.size() > 1 && auto_compute_) {
+    auto_compute_ = false;  
     for ( TTableName tb : tables_missing_stats) {
       ChildQuery c("compute stats " + tb.db_name + "." + 
               tb.table_name , this, parent_server_);

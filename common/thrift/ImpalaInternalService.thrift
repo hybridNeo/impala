@@ -429,7 +429,7 @@ struct TQueryCtx {
   18: required string local_time_zone
 
   // Boolean to indicate auto compute query.
-  19: optional bool is_auto_complete 
+  19: optional bool is_auto_compute 
 }
 
 // Specification of one output destination of a plan fragment
