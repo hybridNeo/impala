@@ -978,8 +978,10 @@ public class Frontend {
     //for ( String s : explainString.split("\n")) {
     //  LOG.info("EPLX_TEXT" + Integer.toString(i++) +  s); 
     //}
-    for ( TTableName tableName : queryCtx.getTables_missing_stats()) {
-      LOG.info("Missing stat: " + tableName.db_name +  tableName.table_name);
+    if( queryCtx.getTables_missing_stats() != null) {
+      for ( TTableName tableName : queryCtx.getTables_missing_stats()) {
+        LOG.info("Missing stat: " + tableName.db_name +  tableName.table_name);
+      }
     }
     // end hack
     result.setQuery_plan(explainString.toString());

@@ -407,7 +407,8 @@ Status ClientRequestState::ExecQueryOrDmlRequest(
   if (query_exec_request.__isset.query_plan) {
     VLOG_QUERY << "IN nested queryexc ";
     VLOG_QUERY << query_exec_request.query_ctx.tables_missing_stats.size();
-    tables_missing_stats = query_exec_request.query_ctx.tables_missing_stats;
+    if (query_exec_request.query_ctx.tables_missing_stats.size() > 1)
+      tables_missing_stats = query_exec_request.query_ctx.tables_missing_stats;
     stringstream plan_ss;
     // Add some delimiters to make it clearer where the plan
     // begins and the profile ends
@@ -570,6 +571,15 @@ void ClientRequestState::Done() {
   // is destroyed).
   BlockOnWait();
   VLOG_QUERY << "Done: MISSING" << tables_missing_stats.size() ;
+  
+  if( tables_missing_stats.size() > 1) {
+    for ( TTableName tb : tables_missing_stats) {
+      ChildQuery c("compute stats " + tb.db_name + "." + 
+              tb.table_name , this, parent_server_);
+      c.ExecAndFetch();
+    }
+  }
+  
   // Update latest observed Kudu timestamp stored in the session from the coordinator.
   // Needs to take the session_ lock which must not be taken while holding lock_, so this
   // must happen before taking lock_ below.
