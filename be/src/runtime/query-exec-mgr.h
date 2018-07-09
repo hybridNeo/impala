@@ -21,10 +21,12 @@
 
 #include <boost/thread/mutex.hpp>
 #include <unordered_map>
+#include <memory>
 
 #include "common/status.h"
 #include "gen-cpp/Types_types.h"
 #include "util/sharded-query-map-util.h"
+#include "util/spinlock.h"
 
 namespace impala {
 
@@ -33,6 +35,7 @@ class Thread;
 class TExecPlanFragmentParams;
 class TQueryCtx;
 class TUniqueId;
+class MemTracker;
 class FragmentInstanceState;
 
 /// A daemon-wide registry and manager of QueryStates. This is the central
@@ -63,11 +66,15 @@ class QueryExecMgr : public CacheLineAligned {
   /// Decrements the refcount for the given QueryState.
   void ReleaseQueryState(QueryState* qs);
 
- private:
+  /// Tracks the memory consumed by runtime filters during aggregation. Child of
+  /// the query mem tracker in 'query_state_' and set in Exec(). Stored in
+  /// query_state_->obj_pool() so it has same lifetime as other MemTrackers.
+  MemTracker* filter_mem_tracker_ = nullptr;
 
+ private:
+  
   typedef ShardedQueryMap<QueryState*> QueryStateMap;
   QueryStateMap qs_map_;
-
   /// Gets the existing QueryState or creates a new one if not present.
   /// 'created' is set to true if it was created, false otherwise.
   /// Increments the refcount.

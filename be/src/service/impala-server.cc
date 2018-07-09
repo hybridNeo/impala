@@ -53,6 +53,8 @@
 #include "runtime/client-cache.h"
 #include "runtime/coordinator.h"
 #include "runtime/data-stream-mgr.h"
+#include "runtime/query-exec-mgr.h"
+#include "runtime/query-state.h"
 #include "runtime/exec-env.h"
 #include "runtime/lib-cache.h"
 #include "runtime/mem-tracker.h"
@@ -2244,6 +2246,17 @@ void ImpalaServer::UpdateFilter(TUpdateFilterResult& result,
     const TUpdateFilterParams& params) {
   DCHECK(params.__isset.query_id);
   DCHECK(params.__isset.filter_id);
+  QueryState *s = ExecEnv::GetInstance()->query_exec_mgr()->
+      GetQueryState(params.query_id);
+  if (s == nullptr) {
+    // ERROR condition when QueryState does not exist
+    result.success = false;
+    result.__isset.success = true;
+  } else {
+    s->UpdateFilter(params);
+  }
+
+  /* TODO remove this or add switch to enable/disable Coordinator Aggregation
   shared_ptr<ClientRequestState> client_request_state =
       GetClientRequestState(params.query_id);
   if (client_request_state.get() == nullptr) {
@@ -2251,5 +2264,6 @@ void ImpalaServer::UpdateFilter(TUpdateFilterResult& result,
     return;
   }
   client_request_state->UpdateFilter(params);
+  */ 
 }
 }

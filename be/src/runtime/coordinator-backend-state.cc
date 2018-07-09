@@ -77,6 +77,7 @@ void Coordinator::BackendState::Init(
 
 void Coordinator::BackendState::SetRpcParams(const DebugOptions& debug_options,
     const FilterRoutingTable& filter_routing_table,
+    const AggregatorRoutingTable& aggregator_routing_table,
     TExecQueryFInstancesParams* rpc_params) {
   rpc_params->__set_protocol_version(ImpalaInternalServiceVersion::V1);
   rpc_params->__set_coord_state_idx(state_idx_);
@@ -84,6 +85,19 @@ void Coordinator::BackendState::SetRpcParams(const DebugOptions& debug_options,
       backend_exec_params_->min_mem_reservation_bytes);
   rpc_params->__set_initial_mem_reservation_total_claims(
       backend_exec_params_->initial_mem_reservation_total_claims);
+
+  // set filter routing table
+  rpc_params->__isset.filter_routing_table = true;
+  for (auto  const& x : filter_routing_table) {
+    TFilterState tfs;
+    x.second.ToThrift(&tfs);
+    AggregatorRoutingTable::const_iterator it = aggregator_routing_table.find(x.first);
+    if (it != aggregator_routing_table.end()) {
+      tfs.__set_aggregator_address(it->second);
+      rpc_params->filter_routing_table.insert(std::pair<int32_t,TFilterState>(
+          x.first, tfs));
+    }
+  }
 
   // set fragment_ctxs and fragment_instance_ctxs
   rpc_params->__isset.fragment_ctxs = true;
@@ -151,12 +165,17 @@ void Coordinator::BackendState::SetRpcParams(const DebugOptions& debug_options,
 
 void Coordinator::BackendState::Exec(
     const DebugOptions& debug_options,
+    const std::vector<TNetworkAddress>& backend_list,
     const FilterRoutingTable& filter_routing_table,
+    const AggregatorRoutingTable& aggregator_routing_table,
     CountingBarrier* exec_complete_barrier) {
   NotifyBarrierOnExit notifier(exec_complete_barrier);
   TExecQueryFInstancesParams rpc_params;
   rpc_params.__set_query_ctx(query_ctx());
-  SetRpcParams(debug_options, filter_routing_table, &rpc_params);
+  rpc_params.__isset.backend_list = true;
+  rpc_params.__set_backend_list(backend_list);
+  SetRpcParams(debug_options, filter_routing_table, 
+      aggregator_routing_table,  &rpc_params);
   VLOG_FILE << "making rpc: ExecQueryFInstances"
       << " host=" << TNetworkAddressToString(impalad_address()) << " query_id="
       << PrintId(query_id());

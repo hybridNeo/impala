@@ -71,7 +71,9 @@ class Coordinator::BackendState {
   /// The debug_options are applied to the appropriate TPlanFragmentInstanceCtxs, based
   /// on their node_id/instance_idx.
   void Exec(const DebugOptions& debug_options,
+      const std::vector<TNetworkAddress>& backend_list,
       const FilterRoutingTable& filter_routing_table,
+      const AggregatorRoutingTable& aggregator_routing_table,
       CountingBarrier* rpc_complete_barrier);
 
   /// Update overall execution status, including the instances' exec status/profiles
@@ -264,6 +266,7 @@ class Coordinator::BackendState {
   /// that weren't selected during its construction.
   void SetRpcParams(const DebugOptions& debug_options,
       const FilterRoutingTable& filter_routing_table,
+      const AggregatorRoutingTable& aggregator_routing_table,
       TExecQueryFInstancesParams* rpc_params);
 
   /// Return true if execution at this backend is done. Caller must hold lock_.

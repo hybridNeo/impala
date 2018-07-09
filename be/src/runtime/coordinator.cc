@@ -128,6 +128,7 @@ Status Coordinator::Exec() {
     // fragment instances. This code anticipates the indices of the instance states
     // created later on in ExecRemoteFragment()
     InitFilterRoutingTable();
+    InitAggregators();
   }
 
   // At this point, all static setup is done and all structures are initialized. Only
@@ -255,6 +256,17 @@ void Coordinator::ExecSummary::Init(const QuerySchedule& schedule) {
   }
 }
 
+
+void Coordinator::InitAggregators() {
+  int num_backends = backend_states_.size();
+  for(auto const& x : filter_routing_table_) {
+     aggregator_routing_table_[x.first] = 
+         backend_states_[num_filters_++ % num_backends]->impalad_address(); 
+  } 
+
+}
+
+
 void Coordinator::InitFilterRoutingTable() {
   DCHECK(schedule_.request().query_ctx.client_request.query_options.mt_dop == 0);
   DCHECK_NE(filter_mode_, TRuntimeFilterMode::OFF)
@@ -331,12 +343,18 @@ void Coordinator::StartBackendExec() {
              << PrintId(query_id());
   query_events_->MarkEvent(Substitute("Ready to start on $0 backends", num_backends));
 
+  /// TODO figure better option
+  /// ips of backend states
+  std::vector<TNetworkAddress> backend_list;
+  for (BackendState* backend_state: backend_states_) {
+    backend_list.push_back(backend_state->impalad_address());
+  }
   for (BackendState* backend_state: backend_states_) {
     ExecEnv::GetInstance()->exec_rpc_thread_pool()->Offer(
-        [backend_state, this, &debug_options]() {
+        [backend_state, this, &debug_options, backend_list]() {
           DebugActionNoFail(schedule_.query_options(), "COORD_BEFORE_EXEC_RPC");
-          backend_state->Exec(debug_options, filter_routing_table_,
-              exec_rpcs_complete_barrier_.get());
+          backend_state->Exec(debug_options, backend_list, filter_routing_table_,
+              aggregator_routing_table_, exec_rpcs_complete_barrier_.get());
         });
   }
   exec_rpcs_complete_barrier_->Wait();

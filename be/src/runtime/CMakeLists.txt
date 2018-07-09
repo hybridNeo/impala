@@ -39,6 +39,7 @@ add_library(Runtime
   descriptors.cc
   dml-exec-state.cc
   exec-env.cc
+  filter-state
   fragment-instance-state.cc
   hbase-table.cc
   hbase-table-factory.cc

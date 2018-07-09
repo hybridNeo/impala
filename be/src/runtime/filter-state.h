@@ -20,7 +20,6 @@
 #include <vector>
 #include <boost/unordered_set.hpp>
 
-#include "runtime/coordinator.h"
 #include "gen-cpp/ImpalaInternalService_types.h"
 #include "gen-cpp/PlanNodes_types.h"
 #include "gen-cpp/Types_types.h"
@@ -30,7 +29,7 @@ namespace impala {
 class MemTracker;
 
 /// Represents a runtime filter target.
-struct Coordinator::FilterTarget {
+struct FilterTarget {
   TPlanNodeId node_id;
   bool is_local;
   bool is_bound_by_partition_columns;
@@ -41,12 +40,26 @@ struct Coordinator::FilterTarget {
       is_local(desc.is_local_target),
       is_bound_by_partition_columns(desc.is_bound_by_partition_columns),
       fragment_idx(f_idx) {}
-  
+
+  FilterTarget(const TPlanNodeId node_id, bool is_local,
+      bool is_bound_by_partition_columns,int fragment_idx)
+    : node_id(node_id),
+      is_local(is_local),
+      is_bound_by_partition_columns(is_bound_by_partition_columns),
+      fragment_idx(fragment_idx) {}
+ 
   void ToThrift(TFilterTarget *t) const {
     t->__set_node_id(node_id);
     t->__set_is_local(is_local);
     t->__set_is_bound_by_partition_columns(is_bound_by_partition_columns);
     t->__set_fragment_idx(fragment_idx);
+  }
+
+  static FilterTarget FromThrift(const TFilterTarget& tfilter_target) {
+    FilterTarget f(tfilter_target.node_id,
+        tfilter_target.is_local,tfilter_target.is_bound_by_partition_columns,
+        tfilter_target.fragment_idx);
+    return f;
   }
 
 };
@@ -63,7 +76,7 @@ struct Coordinator::FilterTarget {
 /// A filter is disabled if an always_true filter update is received, an OOM is hit,
 /// filter aggregation is complete or if the query is complete.
 /// Once a filter is disabled, subsequent updates for that filter are ignored.
-class Coordinator::FilterState {
+class FilterState {
  public:
   FilterState(const TRuntimeFilterDesc& desc, const TPlanNodeId& src)
     : desc_(desc), src_(src), pending_count_(0), first_arrival_time_(0L),
@@ -73,14 +86,30 @@ class Coordinator::FilterState {
     min_max_filter_.always_false = true;
   }
 
+  FilterState(const TRuntimeFilterDesc& desc, const TPlanNodeId& src,
+      const TNetworkAddress& aggregator_address, int pending_count, 
+      int64_t first_arrival_time, int64_t completion_time,
+      const TBloomFilter& bloom_filter, const TMinMaxFilter& min_max_filter)
+  : desc_(desc), src_(src), aggregator_address_(aggregator_address),  
+    pending_count_(pending_count),bloom_filter_(bloom_filter),
+    min_max_filter_(min_max_filter), first_arrival_time_(first_arrival_time), 
+    completion_time_(completion_time)
+    {}
+       
+
   TBloomFilter& bloom_filter() { return bloom_filter_; }
   TMinMaxFilter& min_max_filter() { return min_max_filter_; }
   boost::unordered_set<int>* src_fragment_instance_idxs() {
     return &src_fragment_instance_idxs_;
   }
+  TNetworkAddress aggregator_address() { return aggregator_address_; }
   const boost::unordered_set<int>& src_fragment_instance_idxs() const {
     return src_fragment_instance_idxs_;
   }
+
+  void set_src_fragment_instance_idxs(const boost::unordered_set<int>& set) 
+  { src_fragment_instance_idxs_ = set; }
+  void set_targets(const std::vector<FilterTarget>& targets) { targets_ = targets; }
   std::vector<FilterTarget>* targets() { return &targets_; }
   const std::vector<FilterTarget>& targets() const { return targets_; }
   int64_t first_arrival_time() const { return first_arrival_time_; }
@@ -95,13 +124,13 @@ class Coordinator::FilterState {
     if (is_bloom_filter()) {
       return bloom_filter_.always_true;
     } else {
-      DCHECK(is_min_max_filter());
+      //TODO DCHECK(is_min_max_filter());
       return min_max_filter_.always_true;
     }
   }
 
   void ToThrift(TFilterState* f) const {
-    vector<TFilterTarget> t_targets;
+    std::vector<TFilterTarget> t_targets;
     for (FilterTarget filter_target : targets_) {
       TFilterTarget thrift_filter_target;
       filter_target.ToThrift(&thrift_filter_target);
@@ -124,9 +153,28 @@ class Coordinator::FilterState {
     
   }
 
+  static FilterState FromThrift(const TFilterState& f) {
+    FilterState fs(f.desc,f.src,f.aggregator_address,f.pending_count, 
+      f.first_arrival_time, f.completion_time, f.bloom_filter,
+      f.min_max_filter);
+    std::vector<FilterTarget> targets;
+    for (TFilterTarget filter_target : f.targets) {
+      targets.push_back(FilterTarget::FromThrift(filter_target));
+    }
+    fs.set_targets(targets);
+    boost::unordered_set<int> src_fragment_instance_idxs;
+    for (int idx : f.src_fragment_instance_idxs) {
+      src_fragment_instance_idxs.insert(idx);
+    }
+    fs.set_src_fragment_instance_idxs(src_fragment_instance_idxs); 
+    
+    return fs; 
+    
+  }
+
   /// Aggregates partitioned join filters and updates memory consumption.
   /// Disables filter if always_true filter is received or OOM is hit.
-  void ApplyUpdate(const TUpdateFilterParams& params, Coordinator* coord);
+  void ApplyUpdate(const TUpdateFilterParams& params, MemTracker* filter_mem_tracker);
 
   /// Disables a filter. A disabled filter consumes no memory.
   void Disable(MemTracker* tracker);
@@ -137,6 +185,9 @@ class Coordinator::FilterState {
 
   TPlanNodeId src_;
   std::vector<FilterTarget> targets_;
+
+  // Network Address of the aggregator for the particular filter 
+  TNetworkAddress aggregator_address_;
 
   // Indices of source fragment instances (as returned by GetInstanceIdx()).
   boost::unordered_set<int> src_fragment_instance_idxs_;
@@ -165,3 +216,4 @@ class Coordinator::FilterState {
 };
 
 }
+

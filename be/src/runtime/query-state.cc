@@ -19,6 +19,7 @@
 
 #include <boost/thread/lock_guard.hpp>
 #include <boost/thread/locks.hpp>
+#include <boost/unordered_set.hpp>
 
 #include "common/thread-debug-info.h"
 #include "exprs/expr.h"
@@ -28,10 +29,14 @@
 #include "runtime/bufferpool/reservation-util.h"
 #include "runtime/exec-env.h"
 #include "runtime/fragment-instance-state.h"
+#include "runtime/filter-state.h"
 #include "runtime/initial-reservations.h"
 #include "runtime/mem-tracker.h"
 #include "runtime/query-exec-mgr.h"
 #include "runtime/runtime-state.h"
+#include "util/bloom-filter.h"
+
+#include "util/min-max-filter.h"
 #include "util/debug-util.h"
 #include "util/impalad-metrics.h"
 #include "util/thread.h"
@@ -421,7 +426,7 @@ void QueryState::Cancel() {
 
 void QueryState::PublishFilter(const TPublishFilterParams& params) {
   if (!instances_prepared_promise_.Get().ok()) return;
-  DCHECK_EQ(fragment_map_.count(params.dst_fragment_idx), 1);
+  // DCHECK_EQ(fragment_map_.count(params.dst_fragment_idx), 1);
   for (FragmentInstanceState* fis : fragment_map_[params.dst_fragment_idx]) {
     fis->PublishFilter(params);
   }
@@ -443,4 +448,195 @@ Status QueryState::StartSpilling(RuntimeState* runtime_state, MemTracker* mem_tr
     ImpaladMetrics::NUM_QUERIES_SPILLED->Increment(1);
   }
   return Status::OK();
+}
+
+
+void QueryState::InitFilterRoutingTable(const 
+    std::map<int32_t, TFilterState> filter_routing_table) {
+  for (std::pair<int, TFilterState> it : filter_routing_table) {
+    std::pair<int32_t, FilterState> s = make_pair(it.first,impala::FilterState::FromThrift(it.second)); 
+    filter_routing_table_.insert( s);
+  }
+  
+}
+
+TNetworkAddress QueryState::GetAggregatorAddress(int32_t filter_id) {
+  std::map<int32_t, FilterState>::iterator it = filter_routing_table_.find(filter_id);
+  if (it == filter_routing_table_.end()) {
+    return TNetworkAddress();
+  }
+  return it->second.aggregator_address();
+}
+
+/*
+bool is_bloom_filter(const TFilterState* s) {
+  return s->desc.type == TRuntimeFilterType::BLOOM;
+}
+
+bool is_min_max_filter(const TFilterState* s) {
+  return s->desc.type == TRuntimeFilterType::MIN_MAX;
+} 
+bool disabled(const TFilterState* s) {
+  if(is_bloom_filter(s)) {
+    return s->bloom_filter.always_true;
+  } else {
+    return s->min_max_filter.always_true;
+  }
+}
+*/
+
+
+
+/*
+void QueryState::ApplyUpdate(const TUpdateFilterParams& params, TFilterState* s) {
+  // DCHECK(!disabled());
+  DCHECK_GT(s->pending_count, 0);
+  // DCHECK_EQ(completion_time_, 0L);
+  // if (first_arrival_time_ == 0L) {
+  //   first_arrival_time_ = coord->query_events_->ElapsedTime();
+  // }
+   
+  QueryExecMgr* m = ExecEnv::GetInstance()->query_exec_mgr();
+  s->pending_count--;
+  if (is_bloom_filter(s)) {
+    DCHECK(params.__isset.bloom_filter);
+    if (params.bloom_filter.always_true) {
+      //Disable(coord->filter_mem_tracker_);
+    } else if (s->bloom_filter.always_false) {
+      int64_t heap_space = params.bloom_filter.directory.size();
+      if (!query_mem_tracker_->TryConsume(heap_space)) {
+        VLOG_QUERY << "Not enough memory to allocate filter: "
+                   << PrettyPrinter::Print(heap_space, TUnit::BYTES);
+        // Disable, as one missing update means a correct filter cannot be produced.
+        //Disable(coord->filter_mem_tracker_);
+      } else {
+        // Workaround for fact that parameters are const& for Thrift RPCs - yet we want to
+        // move the payload from the request rather than copy it and take double the
+        // memory cost. After this point, params.bloom_filter is an empty filter and
+        // should not be read.
+        TBloomFilter* non_const_filter = &const_cast<TBloomFilter&>(params.bloom_filter);
+        swap(s->bloom_filter, *non_const_filter);
+        DCHECK_EQ(non_const_filter->directory.size(), 0);
+      }
+    } else {
+      BloomFilter::Or(params.bloom_filter, &s->bloom_filter);
+    }
+  } else {
+    // DCHECK(is_min_max_filter());
+    // DCHECK(params.__isset.min_max_filter);
+    if (params.min_max_filter.always_true) {
+      //Disable(coord->filter_mem_tracker_);
+    } else if (s->min_max_filter.always_false) {
+      MinMaxFilter::Copy(params.min_max_filter, &s->min_max_filter);
+    } else {
+      MinMaxFilter::Or(params.min_max_filter, &s->min_max_filter);
+    }
+  }
+
+  if (s->pending_count == 0 || disabled(s)) {
+    //s->completion_time = coord->query_events_->ElapsedTime();
+  }
+}
+*/
+
+
+void PublishFilterFromAggregator(const TPublishFilterParams& rpc_params, TNetworkAddress host) {
+  Status status;
+  ImpalaBackendConnection backend_client(
+      ExecEnv::GetInstance()->impalad_client_cache(),host, &status);
+  if (!status.ok()) return;
+  TPublishFilterResult res;
+  status = backend_client.DoRpc(&ImpalaBackendClient::PublishFilter, rpc_params, &res);
+  if (!status.ok()) {
+    LOG(WARNING) << "Error publishing filter, continuing... " << status.GetDetail();
+  }
+}
+
+void QueryState::UpdateFilter(const TUpdateFilterParams& params) {
+  // DCHECK_NE(filter_mode_, TRuntimeFilterMode::OFF)
+  //     << "UpdateFilter() called although runtime filters are disabled";
+  // DCHECK(exec_rpcs_complete_barrier_.get() != nullptr)
+  //     << "Filters received before fragments started!";
+
+  // exec_rpcs_complete_barrier_->Wait();
+  // DCHECK(filter_routing_table_complete_)
+  //     << "Filter received before routing table complete";
+  TPublishFilterParams rpc_params;
+  boost::unordered_set<int> target_fragment_idxs;
+  {
+    lock_guard<SpinLock> l(filter_lock_);
+    std::map<int32_t,FilterState>::iterator it = filter_routing_table_.find(params.filter_id);
+    if (it == filter_routing_table_.end()) {
+      LOG(INFO) << "Could not find filter with id: " << params.filter_id;
+      return;
+    }
+    impala::FilterState* state = &it->second;
+
+    DCHECK(state->desc().has_remote_targets)
+             << "Coordinator received filter that has only local targets";
+
+    // Check if the filter has already been sent, which could happen in four cases:
+    //   * if one local filter had always_true set - no point waiting for other local
+    //     filters that can't affect the aggregated global filter
+    //   * if this is a broadcast join, and another local filter was already received
+    //   * if the filter could not be allocated and so an always_true filter was sent
+    //     immediately.
+    //   * query execution finished and resources were released: filters do not need
+    //     to be processed.
+    if (state->disabled()) return;
+
+    //if (filter_updates_received_->value() == 0) {
+      //query_events_->MarkEvent("First dynamic filter received");
+    //}
+    //filter_updates_received_->Add(1);
+
+    state->ApplyUpdate(params, query_mem_tracker_);
+
+    if (state->pending_count() > 0 && !state->disabled()) return;
+    // At this point, we either disabled this filter or aggregation is complete.
+
+    // No more updates are pending on this filter ID. Create a distribution payload and
+    // offer it to the queue.
+    for (const FilterTarget& target: *state->targets()) {
+      // Don't publish the filter to targets that are in the same fragment as the join
+      // that produced it.
+      if (target.is_local) continue;
+      target_fragment_idxs.insert(target.fragment_idx);
+    }
+    if (state->is_bloom_filter()) {
+      // Assign outgoing bloom filter.
+      TBloomFilter& aggregated_filter = state->bloom_filter();
+      query_mem_tracker_->Release(aggregated_filter.directory.size());
+
+      // TODO: Track memory used by 'rpc_params'.
+      swap(rpc_params.bloom_filter, aggregated_filter);
+      DCHECK(rpc_params.bloom_filter.always_false || rpc_params.bloom_filter.always_true
+           || !rpc_params.bloom_filter.directory.empty());
+      DCHECK(aggregated_filter.directory.empty());
+      rpc_params.__isset.bloom_filter = true;
+    } else {
+      DCHECK(state->is_min_max_filter());
+      MinMaxFilter::Copy(state->min_max_filter(), &rpc_params.min_max_filter);
+      rpc_params.__isset.min_max_filter = true;
+    }
+
+    // Filter is complete, and can be released.
+    state->Disable(query_mem_tracker_);
+  }
+
+  rpc_params.__set_dst_query_id(query_id());
+  rpc_params.__set_filter_id(params.filter_id);
+  for (TNetworkAddress t : backend_list) {
+    for (int fragment_idx: target_fragment_idxs) {
+      rpc_params.__set_dst_fragment_idx(fragment_idx);  
+      PublishFilterFromAggregator(rpc_params,t);
+    }
+  }
+  // // Waited for exec_rpcs_complete_barrier_ so backend_states_ is valid.
+  // for (BackendState* bs: backend_states_) {
+  //   for (int fragment_idx: target_fragment_idxs) {
+  //     rpc_params.__set_dst_fragment_idx(fragment_idx);
+  //     bs->PublishFilter(rpc_params);
+  //   }
+  // }
 }
