@@ -45,14 +45,18 @@ Status QueryExecMgr::StartQuery(const TExecQueryFInstancesParams& params) {
   TUniqueId query_id = params.query_ctx.query_id;
   VLOG_QUERY << "StartQueryFInstances() query_id=" << PrintId(query_id)
              << " coord=" << TNetworkAddressToString(params.query_ctx.coord_address);
-
   bool dummy;
   QueryState* qs = GetOrCreateQueryState(params.query_ctx, &dummy);
   Status status = qs->Init(params);
+  qs->backend_list = params.backend_list;
   if (!status.ok()) {
     qs->ReleaseExecResourceRefcount(); // Release refcnt acquired in Init().
     ReleaseQueryState(qs);
     return status;
+  }
+
+  if (params.filter_routing_table.size() != 0) {
+    qs->InitFilterRoutingTable(params.filter_routing_table);
   }
   // avoid blocking the rpc handler thread for too long by starting a new thread for
   // query startup (which takes ownership of the QueryState reference)

@@ -19,7 +19,6 @@
 #define IMPALA_RUNTIME_COORDINATOR_BACKEND_STATE_H
 
 #include <vector>
-#include <unordered_set>
 
 #include <boost/accumulators/accumulators.hpp>
 #include <boost/accumulators/statistics/max.hpp>
@@ -30,12 +29,13 @@
 #include <boost/accumulators/statistics/variance.hpp>
 #include <boost/thread/mutex.hpp>
 
+#include <unordered_set>
+#include "gen-cpp/Types_types.h"
 #include "runtime/coordinator.h"
 #include "scheduling/query-schedule.h"
 #include "util/progress-updater.h"
-#include "util/stopwatch.h"
 #include "util/runtime-profile.h"
-#include "gen-cpp/Types_types.h"
+#include "util/stopwatch.h"
 
 namespace impala {
 
@@ -71,7 +71,9 @@ class Coordinator::BackendState {
   /// The debug_options are applied to the appropriate TPlanFragmentInstanceCtxs, based
   /// on their node_id/instance_idx.
   void Exec(const DebugOptions& debug_options,
+      const std::map<TNetworkAddress, std::set<int32_t>>& backend_list,
       const FilterRoutingTable& filter_routing_table,
+      const AggregatorRoutingTable& aggregator_routing_table,
       CountingBarrier* rpc_complete_barrier);
 
   /// Update overall execution status, including the instances' exec status/profiles
@@ -135,6 +137,15 @@ class Coordinator::BackendState {
   /// Serializes the InstanceStats of all instances of this backend state to JSON by
   /// adding members to 'value', including the remote host name.
   void InstanceStatsToJson(rapidjson::Value* value, rapidjson::Document* doc);
+
+  /// Return the fragments associated with the BackendState as a vector.
+  std::unordered_set<int> GetFragments();
+
+  /// Return the number of filters received.
+  int GetNumReceivedFilters() { return num_received_filters_; }
+
+  /// Set the number of filters received.
+  void SetNumReceivedFilters(int num_filters) { num_received_filters_ = num_filters; }
 
  private:
   /// Execution stats for a single fragment instance.
@@ -219,6 +230,9 @@ class Coordinator::BackendState {
 
   TNetworkAddress host_;
 
+  /// Number of filters received from aggregator associated with the backend state
+  int num_received_filters_ = 0;
+
   /// protects fields below
   /// lock ordering: Coordinator::lock_ must only be obtained *prior* to lock_
   boost::mutex lock_;
@@ -264,6 +278,7 @@ class Coordinator::BackendState {
   /// that weren't selected during its construction.
   void SetRpcParams(const DebugOptions& debug_options,
       const FilterRoutingTable& filter_routing_table,
+      const AggregatorRoutingTable& aggregator_routing_table,
       TExecQueryFInstancesParams* rpc_params);
 
   /// Return true if execution at this backend is done. Caller must hold lock_.

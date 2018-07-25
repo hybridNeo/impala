@@ -19,6 +19,7 @@
 
 #include <boost/thread/lock_guard.hpp>
 #include <boost/thread/locks.hpp>
+#include <boost/unordered_set.hpp>
 
 #include "common/thread-debug-info.h"
 #include "exprs/expr.h"
@@ -27,13 +28,17 @@
 #include "runtime/bufferpool/reservation-tracker.h"
 #include "runtime/bufferpool/reservation-util.h"
 #include "runtime/exec-env.h"
+#include "runtime/filter-state.h"
 #include "runtime/fragment-instance-state.h"
 #include "runtime/initial-reservations.h"
 #include "runtime/mem-tracker.h"
 #include "runtime/query-exec-mgr.h"
 #include "runtime/runtime-state.h"
+#include "util/bloom-filter.h"
+
 #include "util/debug-util.h"
 #include "util/impalad-metrics.h"
+#include "util/min-max-filter.h"
 #include "util/thread.h"
 
 #include "common/names.h"
@@ -56,6 +61,7 @@ QueryState::ScopedRef::~ScopedRef() {
 
 QueryState::QueryState(const TQueryCtx& query_ctx, const string& request_pool)
   : query_ctx_(query_ctx),
+    filter_updates_received_(0),
     exec_resource_refcnt_(0),
     refcnt_(0),
     is_cancelled_(0),
@@ -222,6 +228,8 @@ void QueryState::ReportExecStatusAux(bool done, const Status& status,
   DCHECK(rpc_params().__isset.coord_state_idx);
   params.__set_coord_state_idx(rpc_params().coord_state_idx);
   status.SetTStatus(&params);
+  params.__set_filter_updates_received(filter_updates_received_.Load());
+  params.__isset.filter_updates_received = true;
 
   if (fis != nullptr) {
     // create status for 'fis'
@@ -421,6 +429,9 @@ void QueryState::Cancel() {
 
 void QueryState::PublishFilter(const TPublishFilterParams& params) {
   if (!instances_prepared_promise_.Get().ok()) return;
+  LOG(INFO) << "DebuggingPublishFilter Received filter for fragment "
+            << params.dst_fragment_idx << " : "
+            << fragment_map_.count(params.dst_fragment_idx);
   DCHECK_EQ(fragment_map_.count(params.dst_fragment_idx), 1);
   for (FragmentInstanceState* fis : fragment_map_[params.dst_fragment_idx]) {
     fis->PublishFilter(params);
@@ -443,4 +454,109 @@ Status QueryState::StartSpilling(RuntimeState* runtime_state, MemTracker* mem_tr
     ImpaladMetrics::NUM_QUERIES_SPILLED->Increment(1);
   }
   return Status::OK();
+}
+
+void QueryState::InitFilterRoutingTable(
+    const std::map<int32_t, TFilterState> filter_routing_table) {
+  for (std::pair<int, TFilterState> it : filter_routing_table) {
+    std::pair<int32_t, FilterState> s =
+        make_pair(it.first, impala::FilterState::FromThrift(it.second));
+    filter_routing_table_.insert(s);
+  }
+}
+
+TNetworkAddress QueryState::GetAggregatorAddress(int32_t filter_id) {
+  std::map<int32_t, FilterState>::iterator it = filter_routing_table_.find(filter_id);
+  if (it == filter_routing_table_.end()) {
+    return TNetworkAddress();
+  }
+  return it->second.aggregator_address();
+}
+
+void PublishFilterFromAggregator(
+    const TPublishFilterParams& rpc_params, TNetworkAddress host) {
+  Status status;
+  ImpalaBackendConnection backend_client(
+      ExecEnv::GetInstance()->impalad_client_cache(), host, &status);
+  if (!status.ok()) return;
+  TPublishFilterResult res;
+  status = backend_client.DoRpc(&ImpalaBackendClient::PublishFilter, rpc_params, &res);
+  if (!status.ok()) {
+    LOG(WARNING) << "Error publishing filter, continuing... " << status.GetDetail();
+  }
+}
+
+void QueryState::UpdateFilter(const TUpdateFilterParams& params) {
+  TPublishFilterParams rpc_params;
+  boost::unordered_set<int> target_fragment_idxs;
+  {
+    lock_guard<SpinLock> l(filter_lock_);
+    std::map<int32_t, FilterState>::iterator it =
+        filter_routing_table_.find(params.filter_id);
+    if (it == filter_routing_table_.end()) {
+      LOG(INFO) << "Could not find filter with id: " << params.filter_id;
+      return;
+    }
+    impala::FilterState* state = &it->second;
+
+    DCHECK(state->desc().has_remote_targets)
+        << "Coordinator received filter that has only local targets";
+
+    // Check if the filter has already been sent, which could happen in four cases:
+    //   * if one local filter had always_true set - no point waiting for other local
+    //     filters that can't affect the aggregated global filter
+    //   * if this is a broadcast join, and another local filter was already received
+    //   * if the filter could not be allocated and so an always_true filter was sent
+    //     immediately.
+    //   * query execution finished and resources were released: filters do not need
+    //     to be processed.
+    if (state->disabled()) return;
+
+    filter_updates_received_.Add(1);
+
+    state->ApplyUpdate(params, query_mem_tracker_);
+
+    if (state->pending_count() > 0 && !state->disabled()) return;
+    // At this point, we either disabled this filter or aggregation is complete.
+
+    // No more updates are pending on this filter ID. Create a distribution payload and
+    // offer it to the queue.
+    for (const FilterTarget& target : *state->targets()) {
+      // Don't publish the filter to targets that are in the same fragment as the join
+      // that produced it.
+      if (target.is_local) continue;
+      target_fragment_idxs.insert(target.fragment_idx);
+    }
+    if (state->is_bloom_filter()) {
+      // Assign outgoing bloom filter.
+      TBloomFilter& aggregated_filter = state->bloom_filter();
+      query_mem_tracker_->Release(aggregated_filter.directory.size());
+
+      // TODO: Track memory used by 'rpc_params'.
+      swap(rpc_params.bloom_filter, aggregated_filter);
+      DCHECK(rpc_params.bloom_filter.always_false || rpc_params.bloom_filter.always_true
+          || !rpc_params.bloom_filter.directory.empty());
+      DCHECK(aggregated_filter.directory.empty());
+      rpc_params.__isset.bloom_filter = true;
+    } else {
+      DCHECK(state->is_min_max_filter());
+      MinMaxFilter::Copy(state->min_max_filter(), &rpc_params.min_max_filter);
+      rpc_params.__isset.min_max_filter = true;
+    }
+
+    // Filter is complete, and can be released.
+    state->Disable(query_mem_tracker_);
+  }
+
+  rpc_params.__set_dst_query_id(query_id());
+  rpc_params.__set_filter_id(params.filter_id);
+  for (auto t : backend_list) {
+    for (int fragment_idx : target_fragment_idxs) {
+      if (t.second.count(fragment_idx) == 0) continue;
+      rpc_params.__set_dst_fragment_idx(fragment_idx);
+      LOG(INFO) << "DebuggingPublishFilter Aggregator sending filter to fragment with id "
+                << fragment_idx;
+      PublishFilterFromAggregator(rpc_params, t.first);
+    }
+  }
 }

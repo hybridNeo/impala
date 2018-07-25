@@ -55,14 +55,16 @@
 #include "runtime/exec-env.h"
 #include "runtime/lib-cache.h"
 #include "runtime/mem-tracker.h"
+#include "runtime/query-exec-mgr.h"
+#include "runtime/query-state.h"
 #include "runtime/timestamp-value.h"
 #include "runtime/timestamp-value.inline.h"
 #include "runtime/tmp-file-mgr.h"
 #include "scheduling/scheduler.h"
-#include "service/impala-http-handler.h"
-#include "service/impala-internal-service.h"
 #include "service/client-request-state.h"
 #include "service/frontend.h"
+#include "service/impala-http-handler.h"
+#include "service/impala-internal-service.h"
 #include "util/bit-util.h"
 #include "util/container-util.h"
 #include "util/debug-util.h"
@@ -79,8 +81,8 @@
 #include "util/string-parser.h"
 #include "util/summary-util.h"
 #include "util/test-info.h"
-#include "util/uid-util.h"
 #include "util/time.h"
+#include "util/uid-util.h"
 
 #include "gen-cpp/Types_types.h"
 #include "gen-cpp/ImpalaService.h"
@@ -119,6 +121,7 @@ DECLARE_string(authorized_proxy_group_config_delimiter);
 DECLARE_bool(abort_on_config_error);
 DECLARE_bool(disk_spill_encryption);
 DECLARE_bool(use_local_catalog);
+DECLARE_bool(enable_distributed_filter_aggregation);
 
 DEFINE_int32(beeswax_port, 21000, "port on which Beeswax client requests are served."
     "If 0 or less, the Beeswax server is not started.");
@@ -2215,12 +2218,27 @@ void ImpalaServer::UpdateFilter(TUpdateFilterResult& result,
     const TUpdateFilterParams& params) {
   DCHECK(params.__isset.query_id);
   DCHECK(params.__isset.filter_id);
-  shared_ptr<ClientRequestState> client_request_state =
-      GetClientRequestState(params.query_id);
-  if (client_request_state.get() == nullptr) {
-    LOG(INFO) << "Could not find client request state: " << PrintId(params.query_id);
-    return;
+  QueryState* s =
+      ExecEnv::GetInstance()->query_exec_mgr()->GetQueryState(params.query_id);
+  if (FLAGS_enable_distributed_filter_aggregation == true) {
+    if (s == nullptr) {
+      // ERROR condition when QueryState does not exist.
+      // ExecQueryFInstances has not been received by Aggregator yet.
+      result.status.__set_status_code(TErrorCode::GENERAL);
+      result.__isset.status = true;
+    } else {
+      result.status.__set_status_code(TErrorCode::OK);
+      result.__isset.status = true;
+      s->UpdateFilter(params);
+    }
+  } else {
+    shared_ptr<ClientRequestState> client_request_state =
+        GetClientRequestState(params.query_id);
+    if (client_request_state.get() == nullptr) {
+      LOG(INFO) << "Could not find client request state: " << PrintId(params.query_id);
+      return;
+    }
+    client_request_state->UpdateFilter(params);
   }
-  client_request_state->UpdateFilter(params);
 }
 }

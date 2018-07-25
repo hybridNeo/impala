@@ -39,6 +39,7 @@ inline const RuntimeFilter* RuntimeFilterBank::GetRuntimeFilter(int32_t filter_i
 
 inline void RuntimeFilter::SetFilter(
     BloomFilter* bloom_filter, MinMaxFilter* min_max_filter) {
+  LOG(INFO) << id() << GetStackTrace();
   DCHECK(bloom_filter_.Load() == nullptr && min_max_filter_.Load() == nullptr);
   if (is_bloom_filter()) {
     bloom_filter_.Store(bloom_filter);

@@ -129,6 +129,9 @@ DEFINE_int32(stress_datastream_recvr_delay_ms, 0, "A stress option that causes d
     "stream receiver registration to be delayed. Effective in debug builds only.");
 DEFINE_bool(skip_file_runtime_filtering, false, "Skips file-based runtime filtering for"
     "testing purposes. Effective in debug builds only.");
+DEFINE_bool(enable_distributed_filter_aggregation, true,
+    "Enables aggregation of filters"
+    "in a distributed manner, set to false to revert to coordinator based aggregation");
 DEFINE_int32(fault_injection_rpc_delay_ms, 0, "A fault injection option that causes "
     "rpc server handling to be delayed to trigger an RPC timeout on the caller side. "
     "Effective in debug builds only.");

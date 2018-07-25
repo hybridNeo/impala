@@ -19,12 +19,14 @@
 
 #include "gen-cpp/ImpalaInternalService_types.h"
 #include "gutil/strings/substitute.h"
-#include "runtime/client-cache.h"
-#include "runtime/exec-env.h"
+#include "rpc/thrift-util.h"
 #include "runtime/backend-client.h"
 #include "runtime/bufferpool/reservation-tracker.h"
+#include "runtime/client-cache.h"
+#include "runtime/exec-env.h"
 #include "runtime/initial-reservations.h"
 #include "runtime/mem-tracker.h"
+#include "runtime/query-exec-mgr.h"
 #include "runtime/query-state.h"
 #include "runtime/runtime-filter.inline.h"
 #include "runtime/runtime-state.h"
@@ -35,12 +37,17 @@
 
 #include "common/names.h"
 
+/// Maximum number of times to retry sending filter to the aggregator
+#define MAX_FSEND_RETRY 5
+
 using namespace impala;
 using namespace boost;
 using namespace strings;
+using namespace apache::thrift;
 
 DEFINE_double(max_filter_error_rate, 0.75, "(Advanced) The maximum probability of false "
     "positives in a runtime filter before it is disabled.");
+DECLARE_bool(enable_distributed_filter_aggregation);
 
 const int64_t RuntimeFilterBank::MIN_BLOOM_FILTER_SIZE;
 const int64_t RuntimeFilterBank::MAX_BLOOM_FILTER_SIZE;
@@ -115,6 +122,28 @@ void SendFilterToCoordinator(TNetworkAddress address, TUpdateFilterParams params
   status = coord.DoRpc(&ImpalaBackendClient::UpdateFilter, params, &res);
 }
 
+/// Sends a filter to the Aggregator.
+void SendFilterToAggregator(TNetworkAddress address, TUpdateFilterParams params,
+    ImpalaBackendClientCache* client_cache) {
+  Status status;
+  ImpalaBackendConnection aggregator(client_cache, address, &status);
+  if (!status.ok()) {
+    // Failing to send a filter is not a query-wide error - the remote fragment will
+    // continue regardless.
+    // TODO: Retry.
+    LOG(INFO) << "Couldn't send filter to aggregator: " << status.msg().msg();
+    return;
+  }
+  for (int i = 0; i < MAX_FSEND_RETRY; ++i) {
+    LOG(INFO) << "DebuggingPublishFilter trying to contact aggregator\n";
+    TUpdateFilterResult res;
+    status = aggregator.DoRpc(&ImpalaBackendClient::UpdateFilter, params, &res);
+    LOG(INFO) << res.status.status_code;
+    if (res.status.status_code == TErrorCode::OK) {
+      break;
+    }
+  }
+}
 }
 
 void RuntimeFilterBank::UpdateFilterFromLocal(
@@ -164,10 +193,24 @@ void RuntimeFilterBank::UpdateFilterFromLocal(
       min_max_filter->ToThrift(&params.min_max_filter);
       params.__isset.min_max_filter = true;
     }
+    // ExecEnv::GetInstance()->query_exec_mgr()->GetQueryState(filter_id);
+    LOG(INFO) << "DebuggingPublishFilter Produced filter with filter id" << filter_id;
 
-    ExecEnv::GetInstance()->rpc_pool()->Offer(bind<void>(
-        SendFilterToCoordinator, state_->query_ctx().coord_address, params,
-        ExecEnv::GetInstance()->impalad_client_cache()));
+    if (FLAGS_enable_distributed_filter_aggregation == true) {
+      TNetworkAddress aggregator_address = ExecEnv::GetInstance()
+                                               ->query_exec_mgr()
+                                               ->GetQueryState(state_->query_id())
+                                               ->GetAggregatorAddress(filter_id);
+      // ExecEnv::GetInstance()->rpc_pool()->Offer(bind<void>(
+      //    SendFilterToAggregator, aggregator_address, params,
+      //    ExecEnv::GetInstance()->impalad_client_cache()));
+      SendFilterToAggregator(
+          aggregator_address, params, ExecEnv::GetInstance()->impalad_client_cache());
+    } else {
+      ExecEnv::GetInstance()->rpc_pool()->Offer(
+          bind<void>(SendFilterToCoordinator, state_->query_ctx().coord_address, params,
+              ExecEnv::GetInstance()->impalad_client_cache()));
+    }
   }
 }
 
@@ -189,7 +232,8 @@ void RuntimeFilterBank::PublishGlobalFilter(const TPublishFilterParams& params) 
           BloomFilter::GetExpectedMemoryUsed(params.bloom_filter.log_bufferpool_space);
       DCHECK_GE(buffer_pool_client_.GetUnusedReservation(), required_space)
           << "BufferPool Client should have enough reservation to fulfill bloom filter "
-             "allocation";
+             "allocation Space: "
+          << buffer_pool_client_.GetUnusedReservation() << " | " << required_space;
       bloom_filter = obj_pool_.Add(new BloomFilter(&buffer_pool_client_));
       Status status = bloom_filter->Init(params.bloom_filter);
       if (!status.ok()) {

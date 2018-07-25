@@ -29,6 +29,7 @@
 #include "gen-cpp/Frontend_types.h"
 #include "gen-cpp/Types_types.h"
 #include "runtime/dml-exec-state.h"
+#include "runtime/filter-state.h"
 #include "util/progress-updater.h"
 #include "util/runtime-profile-counters.h"
 #include "util/spinlock.h"
@@ -49,7 +50,6 @@ class MemTracker;
 class PlanRootSink;
 class FragmentInstanceState;
 class QueryState;
-
 
 /// Query coordinator: handles execution of fragment instances on remote nodes, given a
 /// TQueryExecRequest. As part of that, it handles all interactions with the executing
@@ -167,8 +167,6 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
 
  private:
   class BackendState;
-  struct FilterTarget;
-  class FilterState;
   class FragmentStats;
 
   /// owned by the ClientRequestState that owns this coordinator
@@ -303,6 +301,13 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
   typedef boost::unordered_map<int32_t, FilterState> FilterRoutingTable;
   FilterRoutingTable filter_routing_table_;
 
+  /// Map filter id to aggregator
+  typedef boost::unordered_map<int32_t, TNetworkAddress> AggregatorRoutingTable;
+  AggregatorRoutingTable aggregator_routing_table_;
+
+  /// To keep track of number of filters
+  int num_filters_ = 0;
+
   /// Set to true when all calls to UpdateFilterRoutingTable() have finished, and it's
   /// safe to concurrently read from filter_routing_table_.
   bool filter_routing_table_complete_ = false;
@@ -413,6 +418,10 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
   /// Build the filter routing table by iterating over all plan nodes and collecting the
   /// filters that they either produce or consume.
   void InitFilterRoutingTable();
+
+  /// Assign aggregators to each filter by iterating over all the filters and picking
+  /// an aggregator for the filter
+  void InitAggregators();
 
   /// Helper for HandleExecStateTransition(). Releases all resources associated with
   /// query execution. The ExecState state-machine ensures this is called exactly once.

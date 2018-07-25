@@ -498,42 +498,24 @@ enum ImpalaInternalServiceVersion {
   V1
 }
 
+
+// FilterTarget
+
+struct TFilterTarget {
+   1: required Types.TPlanNodeId node_id
+   
+   2: required bool is_local
+   
+   3: required bool is_bound_by_partition_columns
+   
+   4: required i32 fragment_idx
+
+}
+
+
+
 // The following contains the per-rpc structs for the parameters and the result.
 
-// ExecQueryFInstances
-
-struct TExecQueryFInstancesParams {
-  1: required ImpalaInternalServiceVersion protocol_version
-
-  // this backend's index into Coordinator::backend_states_,
-  // needed for subsequent rpcs to the coordinator
-  // required in V1
-  2: optional i32 coord_state_idx
-
-  // required in V1
-  3: optional TQueryCtx query_ctx
-
-  // required in V1
-  4: optional list<TPlanFragmentCtx> fragment_ctxs
-
-  // the order corresponds to the order of fragments in fragment_ctxs
-  // required in V1
-  5: optional list<TPlanFragmentInstanceCtx> fragment_instance_ctxs
-
-  // The minimum query-wide memory reservation (in bytes) required for the backend
-  // executing the instances in fragment_instance_ctxs. This is the peak minimum
-  // reservation that may be required by the concurrently-executing operators at any
-  // point in query execution. It may be less than the initial reservation total claims
-  // (below) if execution of some operators never overlaps, which allows reuse of
-  // reservations. required in V1
-  6: optional i64 min_mem_reservation_bytes
-
-  // Total of the initial buffer reservations that we expect to be claimed on this
-  // backend for all fragment instances in fragment_instance_ctxs. I.e. the sum over all
-  // operators in all fragment instances that execute on this backend. This is used for
-  // an optimization in InitialReservation. Measured in bytes. required in V1
-  7: optional i64 initial_mem_reservation_total_claims
-}
 
 struct TExecQueryFInstancesResult {
   // required in V1
@@ -682,6 +664,8 @@ struct TReportExecStatusParams {
   // 'instance_exec_status' list.
   // This status is only OK if all fragment instances included are OK.
   7: optional Status.TStatus status;
+
+  8: optional i32 filter_updates_received;
 }
 
 struct TReportExecStatusResult {
@@ -807,6 +791,7 @@ struct TUpdateFilterParams {
 }
 
 struct TUpdateFilterResult {
+  1: optional Status.TStatus status
 }
 
 
@@ -834,6 +819,68 @@ struct TPublishFilterParams {
 }
 
 struct TPublishFilterResult {
+}
+
+struct TFilterState {
+  1: required list<TFilterTarget> targets
+   
+  2: required PlanNodes.TRuntimeFilterDesc desc
+    
+  3: required Types.TPlanNodeId src
+
+  4: required i32 pending_count
+
+  5: required set<i32> src_fragment_instance_idxs
+
+  6: required TBloomFilter bloom_filter
+
+  7: required TMinMaxFilter min_max_filter
+
+  8: required i64 first_arrival_time
+
+  9: required i64 completion_time
+
+  10: optional Types.TNetworkAddress aggregator_address
+}
+
+// ExecQueryFInstances
+
+struct TExecQueryFInstancesParams {
+  1: required ImpalaInternalServiceVersion protocol_version
+
+  // this backend's index into Coordinator::backend_states_,
+  // needed for subsequent rpcs to the coordinator
+  // required in V1
+  2: optional i32 coord_state_idx
+
+  // required in V1
+  3: optional TQueryCtx query_ctx
+
+  // required in V1
+  4: optional list<TPlanFragmentCtx> fragment_ctxs
+
+  // the order corresponds to the order of fragments in fragment_ctxs
+  // required in V1
+  5: optional list<TPlanFragmentInstanceCtx> fragment_instance_ctxs
+
+  // The minimum query-wide memory reservation (in bytes) required for the backend
+  // executing the instances in fragment_instance_ctxs. This is the peak minimum
+  // reservation that may be required by the concurrently-executing operators at any
+  // point in query execution. It may be less than the initial reservation total claims
+  // (below) if execution of some operators never overlaps, which allows reuse of
+  // reservations. required in V1
+  6: optional i64 min_mem_reservation_bytes
+
+  // Total of the initial buffer reservations that we expect to be claimed on this
+  // backend for all fragment instances in fragment_instance_ctxs. I.e. the sum over all
+  // operators in all fragment instances that execute on this backend. This is used for
+  // an optimization in InitialReservation. Measured in bytes. required in V1
+  7: optional i64 initial_mem_reservation_total_claims
+ 
+  8: optional map<i32, TFilterState> filter_routing_table
+
+  9: optional map<Types.TNetworkAddress, set<i32>> backend_list
+  
 }
 
 

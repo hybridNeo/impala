@@ -19,12 +19,14 @@
 #ifndef IMPALA_RUNTIME_QUERY_EXEC_MGR_H
 #define IMPALA_RUNTIME_QUERY_EXEC_MGR_H
 
-#include <boost/thread/mutex.hpp>
+#include <memory>
 #include <unordered_map>
+#include <boost/thread/mutex.hpp>
 
 #include "common/status.h"
 #include "gen-cpp/Types_types.h"
 #include "util/sharded-query-map-util.h"
+#include "util/spinlock.h"
 
 namespace impala {
 
@@ -33,6 +35,7 @@ class Thread;
 class TExecPlanFragmentParams;
 class TQueryCtx;
 class TUniqueId;
+class MemTracker;
 class FragmentInstanceState;
 
 /// A daemon-wide registry and manager of QueryStates. This is the central
@@ -64,10 +67,8 @@ class QueryExecMgr : public CacheLineAligned {
   void ReleaseQueryState(QueryState* qs);
 
  private:
-
   typedef ShardedQueryMap<QueryState*> QueryStateMap;
   QueryStateMap qs_map_;
-
   /// Gets the existing QueryState or creates a new one if not present.
   /// 'created' is set to true if it was created, false otherwise.
   /// Increments the refcount.
