@@ -120,6 +120,10 @@ DEFINE_bool(load_auth_to_local_rules, false, "If true, load auth_to_local config
     "hadoop.security.auth_to_local and applies them to translate the Kerberos principal "
     "to its corresponding local user name for authorization.");
 
+DEFINE_bool(enable_distributed_filter_aggregation, true,
+    "Enables aggregation of filters"
+    "in a distributed manner, set to false to revert to coordinator based aggregation");
+
 // Stress options that are only enabled in debug builds for testing.
 #ifndef NDEBUG
 DEFINE_int32(stress_fn_ctx_alloc, 0, "A stress option which causes memory allocations "

@@ -27,8 +27,10 @@
 #include "gen-cpp/ImpalaInternalService_types.h"
 #include "gen-cpp/Types_types.h"
 #include "runtime/tmp-file-mgr.h"
-#include "util/uid-util.h"
 #include "util/promise.h"
+#include "util/runtime-profile-counters.h"
+#include "util/spinlock.h"
+#include "util/uid-util.h"
 
 namespace impala {
 
@@ -37,6 +39,7 @@ class InitialReservations;
 class MemTracker;
 class ReservationTracker;
 class RuntimeState;
+class FilterState;
 
 /// Central class for all backend execution state (example: the FragmentInstanceStates
 /// of the individual fragment instances) created for a particular query.
@@ -174,6 +177,18 @@ class QueryState {
   /// tracker->MemLimitExceeded() to 'runtime_state'.
   Status StartSpilling(RuntimeState* runtime_state, MemTracker* mem_tracker);
 
+  /// Initialize/set the filter routing table based on received params
+  void InitFilterRoutingTable(const std::map<int32_t, TFilterState>& filter_routing_table);
+
+  /// fetches the aggregator address for the filter by looking up filter_routing_table
+  TNetworkAddress GetAggregatorAddress(int32_t filter_id);
+
+  /// Receive a local filter update from a fragment instance. Aggregate that filter update
+  /// with others for the same filter ID into a global filter. If all updates for that
+  /// filter ID have been received (may be 1 or more per filter), broadcast the global
+  /// filter to fragment instances.
+  void UpdateFilter(const TUpdateFilterParams& params);
+
   ~QueryState();
 
  private:
@@ -188,8 +203,20 @@ class QueryState {
   /// set in c'tor
   const TQueryCtx query_ctx_;
 
+  /// QueryState's copy of the filter routing table, contains aggregator information.
+  std::map<int32_t, FilterState> filter_routing_table_;
+
+  /// lock used in UpdateFilter, guards filter_routing_table_.
+  SpinLock filter_lock_;
+
+  /// holds information regarding fragments executing in a backend(TNetworkAddress)
+  std::map<TNetworkAddress, std::set<int32_t>> backend_list_;
+
   /// the top-level MemTracker for this query (owned by obj_pool_), created in c'tor
   MemTracker* query_mem_tracker_ = nullptr;
+
+  /// Number of filter updates received by this aggregator
+  AtomicInt32 filter_updates_received_;
 
   /// set in Prepare(); rpc_params_.query_ctx is *not* set to avoid duplication
   /// with query_ctx_
@@ -270,6 +297,8 @@ class QueryState {
   /// Cancel on error only if instances_started is true.
   void ReportExecStatusAux(bool done, const Status& status, FragmentInstanceState* fis,
       bool instances_started);
+
+  void ApplyUpdate(const TUpdateFilterParams& params, TFilterState* s);
 };
 }
 

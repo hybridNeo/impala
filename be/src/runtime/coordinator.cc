@@ -34,7 +34,6 @@
 #include "runtime/fragment-instance-state.h"
 #include "runtime/hdfs-fs-cache.h"
 #include "runtime/query-exec-mgr.h"
-#include "runtime/coordinator-filter-state.h"
 #include "runtime/coordinator-backend-state.h"
 #include "runtime/debug-options.h"
 #include "runtime/query-state.h"
@@ -128,6 +127,7 @@ Status Coordinator::Exec() {
     // fragment instances. This code anticipates the indices of the instance states
     // created later on in ExecRemoteFragment()
     InitFilterRoutingTable();
+    InitAggregators();
   }
 
   // At this point, all static setup is done and all structures are initialized. Only
@@ -255,6 +255,15 @@ void Coordinator::ExecSummary::Init(const QuerySchedule& schedule) {
   }
 }
 
+void Coordinator::InitAggregators() {
+  int num_backends = backend_states_.size();
+  int num_filters = 0;
+  for (auto& filter : filter_routing_table_) {
+    filter.second.set_aggregator_address(
+        backend_states_[num_filters++ % num_backends]->impalad_address());
+  }
+}
+
 void Coordinator::InitFilterRoutingTable() {
   DCHECK(schedule_.request().query_ctx.client_request.query_options.mt_dop == 0);
   DCHECK_NE(filter_mode_, TRuntimeFilterMode::OFF)
@@ -331,11 +340,19 @@ void Coordinator::StartBackendExec() {
              << PrintId(query_id());
   query_events_->MarkEvent(Substitute("Ready to start on $0 backends", num_backends));
 
+  /// TODO figure better option
+  /// Get ips of backend states
+  std::map<TNetworkAddress, std::set<int32_t>> backend_list;
+  for (BackendState* backend_state : backend_states_) {
+    for (int32_t fragment_idx : backend_state->GetFragments()) {
+      backend_list[backend_state->impalad_address()].insert(fragment_idx);
+    }
+  }
   for (BackendState* backend_state: backend_states_) {
     ExecEnv::GetInstance()->exec_rpc_thread_pool()->Offer(
-        [backend_state, this, &debug_options]() {
+        [backend_state, this, &debug_options, backend_list]() {
           DebugActionNoFail(schedule_.query_options(), "COORD_BEFORE_EXEC_RPC");
-          backend_state->Exec(debug_options, filter_routing_table_,
+          backend_state->Exec(debug_options, backend_list, filter_routing_table_,
               exec_rpcs_complete_barrier_.get());
         });
   }
@@ -671,7 +688,11 @@ Status Coordinator::UpdateBackendExecStatus(const TReportExecStatusParams& param
             params.coord_state_idx, backend_states_.size() - 1));
   }
   BackendState* backend_state = backend_states_[params.coord_state_idx];
-
+  // Update aggregator's filter metrics in runtime profile.
+  if (params.__isset.filter_updates_received) {
+    backend_state->UpdateFiltersReceived(params.filter_updates_received,
+        filter_updates_received_);
+  }
   // TODO: only do this when the sink is done; probably missing a done field
   // in TReportExecStatus for that
   if (params.__isset.insert_exec_status) {
@@ -818,14 +839,14 @@ void Coordinator::UpdateFilter(const TUpdateFilterParams& params) {
     }
     filter_updates_received_->Add(1);
 
-    state->ApplyUpdate(params, this);
+    state->ApplyUpdate(params, this->filter_mem_tracker_);
 
     if (state->pending_count() > 0 && !state->disabled()) return;
     // At this point, we either disabled this filter or aggregation is complete.
 
     // No more updates are pending on this filter ID. Create a distribution payload and
     // offer it to the queue.
-    for (const FilterTarget& target: *state->targets()) {
+    for (const impala::FilterTarget& target : *state->targets()) {
       // Don't publish the filter to targets that are in the same fragment as the join
       // that produced it.
       if (target.is_local) continue;
@@ -862,71 +883,6 @@ void Coordinator::UpdateFilter(const TUpdateFilterParams& params) {
       rpc_params.__set_dst_fragment_idx(fragment_idx);
       bs->PublishFilter(rpc_params);
     }
-  }
-}
-
-void Coordinator::FilterState::ApplyUpdate(const TUpdateFilterParams& params,
-    Coordinator* coord) {
-  DCHECK(!disabled());
-  DCHECK_GT(pending_count_, 0);
-  DCHECK_EQ(completion_time_, 0L);
-  if (first_arrival_time_ == 0L) {
-    first_arrival_time_ = coord->query_events_->ElapsedTime();
-  }
-
-  --pending_count_;
-  if (is_bloom_filter()) {
-    DCHECK(params.__isset.bloom_filter);
-    if (params.bloom_filter.always_true) {
-      Disable(coord->filter_mem_tracker_);
-    } else if (bloom_filter_.always_false) {
-      int64_t heap_space = params.bloom_filter.directory.size();
-      if (!coord->filter_mem_tracker_->TryConsume(heap_space)) {
-        VLOG_QUERY << "Not enough memory to allocate filter: "
-                   << PrettyPrinter::Print(heap_space, TUnit::BYTES)
-                   << " (query_id=" << PrintId(coord->query_id()) << ")";
-        // Disable, as one missing update means a correct filter cannot be produced.
-        Disable(coord->filter_mem_tracker_);
-      } else {
-        // Workaround for fact that parameters are const& for Thrift RPCs - yet we want to
-        // move the payload from the request rather than copy it and take double the
-        // memory cost. After this point, params.bloom_filter is an empty filter and
-        // should not be read.
-        TBloomFilter* non_const_filter = &const_cast<TBloomFilter&>(params.bloom_filter);
-        swap(bloom_filter_, *non_const_filter);
-        DCHECK_EQ(non_const_filter->directory.size(), 0);
-      }
-    } else {
-      BloomFilter::Or(params.bloom_filter, &bloom_filter_);
-    }
-  } else {
-    DCHECK(is_min_max_filter());
-    DCHECK(params.__isset.min_max_filter);
-    if (params.min_max_filter.always_true) {
-      Disable(coord->filter_mem_tracker_);
-    } else if (min_max_filter_.always_false) {
-      MinMaxFilter::Copy(params.min_max_filter, &min_max_filter_);
-    } else {
-      MinMaxFilter::Or(params.min_max_filter, &min_max_filter_);
-    }
-  }
-
-  if (pending_count_ == 0 || disabled()) {
-    completion_time_ = coord->query_events_->ElapsedTime();
-  }
-}
-
-void Coordinator::FilterState::Disable(MemTracker* tracker) {
-  if (is_bloom_filter()) {
-    bloom_filter_.always_true = true;
-    bloom_filter_.always_false = false;
-    tracker->Release(bloom_filter_.directory.size());
-    bloom_filter_.directory.clear();
-    bloom_filter_.directory.shrink_to_fit();
-  } else {
-    DCHECK(is_min_max_filter());
-    min_max_filter_.always_true = true;
-    min_max_filter_.always_false = false;
   }
 }
 

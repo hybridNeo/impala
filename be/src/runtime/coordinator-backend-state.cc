@@ -27,7 +27,6 @@
 #include "runtime/debug-options.h"
 #include "runtime/client-cache.h"
 #include "runtime/backend-client.h"
-#include "runtime/coordinator-filter-state.h"
 #include "util/uid-util.h"
 #include "util/network-util.h"
 #include "util/counting-barrier.h"
@@ -85,10 +84,21 @@ void Coordinator::BackendState::SetRpcParams(const DebugOptions& debug_options,
   rpc_params->__set_initial_mem_reservation_total_claims(
       backend_exec_params_->initial_mem_reservation_total_claims);
 
+  // set filter routing table
+  // TODO do not send filter table to nodes which don't participate in runtime filters
+  rpc_params->__isset.filter_routing_table = true;
   // set fragment_ctxs and fragment_instance_ctxs
   rpc_params->__isset.fragment_ctxs = true;
   rpc_params->__isset.fragment_instance_ctxs = true;
   rpc_params->fragment_instance_ctxs.resize(backend_exec_params_->instance_params.size());
+  rpc_params->__isset.filter_routing_table = true;
+  // iterating through the filter routing table and adding the filter to the epc params.
+  for (auto const& filter : filter_routing_table) {
+    TFilterState tfs;
+    filter.second.ToThrift(&tfs);
+    rpc_params->filter_routing_table.insert(
+        std::pair<int32_t, TFilterState>(filter.first, tfs));
+  }
   for (int i = 0; i < backend_exec_params_->instance_params.size(); ++i) {
     TPlanFragmentInstanceCtx& instance_ctx = rpc_params->fragment_instance_ctxs[i];
     const FInstanceExecParams& params = *backend_exec_params_->instance_params[i];
@@ -149,13 +159,15 @@ void Coordinator::BackendState::SetRpcParams(const DebugOptions& debug_options,
   }
 }
 
-void Coordinator::BackendState::Exec(
-    const DebugOptions& debug_options,
+void Coordinator::BackendState::Exec(const DebugOptions& debug_options,
+    const std::map<TNetworkAddress, std::set<int32_t>>& backend_list,
     const FilterRoutingTable& filter_routing_table,
     CountingBarrier* exec_complete_barrier) {
   NotifyBarrierOnExit notifier(exec_complete_barrier);
   TExecQueryFInstancesParams rpc_params;
   rpc_params.__set_query_ctx(query_ctx());
+  rpc_params.__isset.backend_list = true;
+  rpc_params.__set_backend_list(backend_list);
   SetRpcParams(debug_options, filter_routing_table, &rpc_params);
   VLOG_FILE << "making rpc: ExecQueryFInstances"
       << " host=" << TNetworkAddressToString(impalad_address()) << " query_id="
@@ -215,6 +227,15 @@ int64_t Coordinator::BackendState::GetPeakConsumption() {
   return peak_consumption_;
 }
 
+void Coordinator::BackendState::UpdateFiltersReceived(int filters_received,
+    RuntimeProfile::Counter* counter) {
+  lock_guard<mutex> l(lock_);
+  // To make sure that we don't double count filter updates.
+  if(num_received_filters_ < filters_received) {
+    counter->Add(filters_received - num_received_filters_); 
+    num_received_filters_ = filters_received;
+  }
+}
 void Coordinator::BackendState::MergeErrorLog(ErrorLogMap* merged) {
   lock_guard<mutex> l(lock_);
   if (error_log_.size() > 0)  MergeErrorMaps(error_log_, merged);
@@ -616,4 +637,8 @@ void Coordinator::BackendState::InstanceStatsToJson(Value* value, Document* docu
   // protected by Coordinator::lock_.
   Value val(TNetworkAddressToString(impalad_address()).c_str(), document->GetAllocator());
   value->AddMember("host", val, document->GetAllocator());
+}
+
+std::unordered_set<int> Coordinator::BackendState::GetFragments() {
+  return fragments_;
 }
