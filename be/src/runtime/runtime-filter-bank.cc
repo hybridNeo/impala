@@ -199,8 +199,9 @@ void RuntimeFilterBank::UpdateFilterFromLocal(
                                                ->GetQueryState(state_->query_id())
                                                ->GetAggregatorAddress(filter_id);
       // TODO: Short circuit if aggregator is on same node.
-      SendFilterToAggregator(
-          aggregator_address, params, ExecEnv::GetInstance()->impalad_client_cache());
+      ExecEnv::GetInstance()->rpc_pool()->Offer(
+          bind<void>(SendFilterToAggregator, aggregator_address, params,
+              ExecEnv::GetInstance()->impalad_client_cache()));
     } else {
       ExecEnv::GetInstance()->rpc_pool()->Offer(
           bind<void>(SendFilterToCoordinator, state_->query_ctx().coord_address, params,
